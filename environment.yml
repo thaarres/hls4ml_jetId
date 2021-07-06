@@ -1,0 +1,16 @@
+name: hls4ml-tf25-hack
+channels:
+  - conda-forge
+dependencies:
+  - python=3.7
+  - jupyterhub
+  - pydot
+  - graphviz
+  - pip
+  - pip:
+    - jupyter
+    - tensorflow==2.5
+    - tensorflow_datasets
+    - git+https://github.com/vloncar/hls4ml@cnn_sepconv_fix#egg=hls4ml[profiling]
+    - git+https://github.com/google/qkeras.git#egg=qkeras
+    - scikit-learn
