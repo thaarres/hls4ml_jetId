@@ -1,4 +1,4 @@
-name: hls4ml-tf25-hack
+name: hls4ml-l1jets
 channels:
   - conda-forge
 dependencies:
@@ -11,6 +11,7 @@ dependencies:
     - jupyter
     - tensorflow==2.5
     - tensorflow_datasets
-    - git+https://github.com/vloncar/hls4ml@cnn_sepconv_fix#egg=hls4ml[profiling]
+    - git+https://github.com/fastmachinelearning/hls4ml.git#egg=hls4ml[profiling]
     - git+https://github.com/google/qkeras.git#egg=qkeras
     - scikit-learn
+    - uproot
