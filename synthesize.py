@@ -1,3 +1,13 @@
+# This code requires a special version of hls4ml which includes GarNet and a few minor bug fixes not yet on master.
+# You can install it via
+# pip install git+https://https://github.com/thaarres/hls4ml.git@jet_tag_paper
+# or
+# git clone -b jet_tag_paper https://github.com/thaarres/hls4ml.git
+# cd hls4ml
+# pip install . --user
+#
+# The current projects can be inspected at https://thaarres.web.cern.ch/thaarres/l1_jet_tagging/l1_jet_tagging_hls4ml_dataset/
+
 import sys, os
 import hls4ml
 import tensorflow as tf
@@ -12,13 +22,15 @@ import pprint
 import numpy as np
 from sklearn.metrics import roc_curve, auc, accuracy_score
 
-from garnet import GarNetStack, GarNet
+from garnet import GarNet
 
 import matplotlib.pyplot as plt 
 
 from joblib import Parallel, delayed
 import time
 import shutil
+
+import argparse
 
 def print_dict(d, indent=0):
   align=20
@@ -31,12 +43,7 @@ def print_dict(d, indent=0):
       print(':' + ' ' * (20 - len(key) - 2 * indent) + str(value))
 
             
-def synthezise(mname,plotpath,ONAME):
-  
-  print("|||||||||||||||||||||||||||||")
-  print("\nSynthesizing:  {}\n".format(mname))
-  print("|||||||||||||||||||||||||||||")
-  
+def synthezise(mname,plotpath,ONAME,build=False):
   
   # Make output directories
   PLOTS = '{}/{}/'.format(plotpath,mname)
@@ -53,12 +60,11 @@ def synthezise(mname,plotpath,ONAME):
                                                      'QConv1D' : QConv1D,
                                                      'QConv2D' : QConv2D,
                                                      'quantized_bits': quantized_bits,
-                                                     'GarNet': GarNet(total_bits = int(mname.split("_")[-1][0]),int_bits = 0)
+                                                     'GarNet': GarNet
                                                    })                                       
+    
   if DEBUG:
     model.summary()
-    print_qmodel_summary(model)
-    print_dict(model.get_config())
   
   # Get softmax layer name
   for layer in model.layers:
@@ -106,16 +112,14 @@ def synthezise(mname,plotpath,ONAME):
     config['LayerName']['concatenate_25'] = {}
     config['LayerName']['concatenate_25']['Precision'] = inputPrecision
      
-  # Bug! Cloned layer gets default precision rather than input precision
+  # Bug! Cloned layer gets default precision rather than input precision TODO! Remove this when receive new models from Andre
   if 'QGraphConv' in mname:
-    config['LayerName']['clone_input'] = {}
-    config['LayerName']['clone_input']['Precision'] = 'ap_fixed<20,10,AP_RND,AP_SAT>'
-               
-
+    from hls4ml.model.optimizer.optimizer import optimizer_map
+    optimizer_map.pop('clone_output')     
       
   #Special cases:      
   changeStrategy = False
-  if changeStrategy: #Change strategy if layer is > 4,096 TODO: DOesn't really work to set strategy per layer
+  if changeStrategy: #Change strategy if layer is > 4,096. Doesn't work to set strategy per layer for io_stream type models
       for layer in model.layers:
         config['LayerName'][layer.name]['Strategy'] = 'Latency'
         w = layer.get_weights()[0]
@@ -125,9 +129,7 @@ def synthezise(mname,plotpath,ONAME):
           print("Layer {} is too large ({}), changing strategy Latency --> Resource".format(layer.name,layersize))
           config['LayerName'][layer.name]['Strategy'] = 'Resource'
 
-  print("-----------------------------------")
   print_dict(config)
-  print("-----------------------------------")
   
   # Old hls4ml
   # cfg = hls4ml.converters.create_vivado_config() #Deprecated
@@ -149,19 +151,19 @@ def synthezise(mname,plotpath,ONAME):
   hls_model.compile()
   
   # Do plots
-  
   hls4ml.utils.plot_model(hls_model, show_shapes=True, show_precision=True, to_file='{}/hls4ml_in_plot_{}.png'.format(PLOTS,mname))
+  tf.keras.utils.plot_model(model,to_file='{}/keras_in_plot_{}.png'.format(PLOTS,mname))
   
   
   # Has shape (-1,8,3)
-  X_test = np.ascontiguousarray(np.load('data/x_test_8const_full.npy'))
-  Y_test = np.load('data/y_test_8const_full.npy', allow_pickle=True)
+  X_test = np.ascontiguousarray(np.load('/eos/home-t/thaarres/level1_jet_validation_samples/x_test_8const_full.npy'))
+  Y_test = np.load('/eos/home-t/thaarres/level1_jet_validation_samples/y_test_8const_full.npy', allow_pickle=True)
   X_test = X_test[:3000]
   Y_test = Y_test[:3000]
     
   if 'GNN_model_' in mname:
-    X_test = np.ascontiguousarray(np.load('data/x_test_garnet_8const_full.npy'))
-    Y_test = np.load('data/y_test_garnet_8const_full.npy', allow_pickle=True)
+    X_test = np.ascontiguousarray(np.load('/eos/home-t/thaarres/level1_jet_validation_samples/x_test_8const_garnet.npy'))
+    Y_test = np.load('/eos/home-t/thaarres/level1_jet_validation_samples/y_test_8const_garnet.npy', allow_pickle=True)
     X_test = X_test[:3000]
     Y_test = Y_test[:3000]
     
@@ -223,28 +225,29 @@ def synthezise(mname,plotpath,ONAME):
   #ax.set_grid(True)
   ax.legend(loc='lower right')
   plt.savefig('{}/ROC_keras_{}.png'.format(PLOTS,mname))
-  #
-  # wp, wph, ap, aph = hls4ml.model.profiling.numerical(model,hls_model,X_test)
-  # wp.savefig("{}/wp_{}.png".format(PLOTS,mname))
-  # wph.savefig("{}/wph_{}.png".format(PLOTS,mname))
-  # ap.savefig("{}/ap_{}.png".format(PLOTS,mname))
-  # aph.savefig("{}/aph_{}.png".format(PLOTS,mname))
-  # fig = hls4ml.model.profiling.compare(model,hls_model,X_test)
-  # fig.savefig("{}/compare_{}.png".format(PLOTS,mname))
-  #
+  
+  if not 'GNN_' in mname: #TODO! Add profiling for multiple inputs
+    wp, wph, ap, aph = hls4ml.model.profiling.numerical(model,hls_model,X_test)
+    wp.savefig("{}/wp_{}.png".format(PLOTS,mname))
+    wph.savefig("{}/wph_{}.png".format(PLOTS,mname))
+    ap.savefig("{}/ap_{}.png".format(PLOTS,mname))
+    aph.savefig("{}/aph_{}.png".format(PLOTS,mname))
+    fig = hls4ml.model.profiling.compare(model,hls_model,X_test)
+    fig.savefig("{}/compare_{}.png".format(PLOTS,mname))
+
   
   print("Running synthesis!")
-  hls_model.build(csim=False, synth=True, vsynth=True)
+  if build:
+    hls_model.build(csim=False, synth=True, vsynth=True)
 
 def getReports(indir):
     data_ = {}
-    
+    data_['architecture']   = str(indir.split('/')[-2].replace('model_',''))
+    data_['precision']   = str(indir.split('_')[-1].replace('bit',''))
     report_vsynth = Path('{}/vivado_synth.rpt'.format(indir))
     report_csynth = Path('{}/myproject_prj/solution1/syn/report/myproject_csynth.rpt'.format(indir))
     
     if report_vsynth.is_file() and report_csynth.is_file():
-        print('Found valid vsynth and synth in {}! Fetching numbers'.format(indir))
-        
         # Get the resources from the logic synthesis report 
         with report_vsynth.open() as report:
           lines = np.array(report.readlines())
@@ -261,48 +264,66 @@ def getReports(indir):
           lines = np.array(report.readlines())
           lat_line = lines[np.argwhere(np.array(['Latency (cycles)' in line for line in lines])).flatten()[0] + 3]
           data_['latency_clks'] = int(lat_line.split('|')[2])
-          data_['latency_ns']  = float(lat_line.split('|')[2])*5.0
+          data_['latency_ns']   = int(lat_line.split('|')[2])*5.0
           data_['latency_ii']   = int(lat_line.split('|')[6])
     
     return data_
-   
-if __name__ == "__main__": 
+
+
+# Initiate the parser
+parser = argparse.ArgumentParser()
+parser.add_argument("-C", "--create", help="Create projects", action="store_true")
+parser.add_argument("-B", "--build", help="Build projects", action="store_true")
+parser.add_argument("--plotdir", help="Output path for plots", default="/eos/home-t/thaarres/www/l1_jet_tagging/l1_jet_tagging_hls4ml_dataset/")
+parser.add_argument("-o", "--outdir", help="Output path for projects", default="/mnt/data/thaarres/HLS_PROJECTS")
+parser.add_argument("-D", "--debug", help="High verbose", action="store_true")
+args = parser.parse_args()
   
+   
+if __name__ == "__main__":
+  
+
+  # List of models to synthesize
   models = [
-            "GNN_model_4bit",
+            "GNN_model_4bit", #TODO! Replace by new models from Arpita, these cannot be loaded from .h5. Tune precision!
             "GNN_model_6bit",
             "GNN_model_8bit",
-            "QGraphConv_nconst_8_nbits_4",
-            "QGraphConv_nconst_8_nbits_6",
-            "QGraphConv_nconst_8_nbits_8",
-            "model_QInteractionNetwork_nconst_8_nbits_4",
-            "model_QInteractionNetwork_nconst_8_nbits_6",
-            "model_QInteractionNetwork_nconst_8_nbits_8",
-            "model_QMLP_nconst_8_nbits_4",
-            "model_QMLP_nconst_8_nbits_6",
-            "model_QMLP_nconst_8_nbits_8"
+            # "QGraphConv_nconst_8_nbits_4", #TODO! Replace by new models from Andre, changing input layer name
+            # "QGraphConv_nconst_8_nbits_6",
+            # "QGraphConv_nconst_8_nbits_8",
+            # "model_QInteractionNetwork_nconst_8_nbits_4",
+            # "model_QInteractionNetwork_nconst_8_nbits_6",
+            # "model_QInteractionNetwork_nconst_8_nbits_8",
+            # "model_QMLP_nconst_8_nbits_4",
+            # "model_QMLP_nconst_8_nbits_6",
+            # "model_QMLP_nconst_8_nbits_8",
           ]
   
-  PLOTS = '/eos/home-t/thaarres/www/l1_jet_tagging/l1_jet_tagging_hls4ml_dataset/'
-  ONAME = '/mnt/data/thaarres/HLS_PROJECTS'
-  SYNTH = False  # Synthesize the models
-  DEBUG = True
-    
-  if SYNTH:  
+  PLOTS = args.plotdir
+  ONAME = args.outdir
+  DEBUG = args.debug
+  
+  # Generate projects and produce firmware  
+  if args.create:  
     start = time.time()
-    Parallel(n_jobs=4, backend='multiprocessing')(delayed(synthezise)(modelname,PLOTS,ONAME) for modelname in models)
+    Parallel(n_jobs=4, backend='multiprocessing')(delayed(synthezise)(modelname,PLOTS,ONAME,build=args.build) for modelname in models)
     end = time.time()
     print('Ended after {:.4f} s'.format(end-start))
       
     
-    # Only read latency and resource consumption     
+  # Only read projects
   else:
+    
+    import pandas
+    data = {'architecture':[],'precision':[], 'dsp':[], 'lut':[], 'ff':[],'bram':[],'dsp_rel':[], 'lut_rel':[], 'ff_rel':[],'bram_rel':[], 'latency_clks':[], 'latency_ns':[], 'latency_ii':[]}
     
     for mname in models:
       print("Reading hls project {}/{}/".format(ONAME,mname))
       
-      data = getReports('{}/{}/'.format(ONAME,mname))
-
-      print("\n Resource usage and latency: {}".format(mname))
-      pprint.pprint(data)
-
+      datai = getReports('{}/{}/'.format(ONAME,mname))
+      for key in datai.keys():
+         data[key].append(datai[key])
+    
+    dataP = pandas.DataFrame(data)
+    print(dataP)
+    print(dataP.to_latex(columns=['architecture','precision','latency_clks','latency_ns','latency_ii','dsp','dsp_rel','lut','lut_rel','ff','ff_rel','bram','bram_rel'],header=['Architecture','Precision','Latency [cc]','Latency [ns]','II[cc]','DSP','DSP [%]','LUT','LUT [%]','FF','FF [%]','BRAM','BRAM [%]'],index=False,escape=False))
