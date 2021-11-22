@@ -24,15 +24,13 @@ class NamedDense(keras.layers.Dense):
         return super(NamedDense, self).add_weight(name='%s_%s' % (self.name, name), **kwargs)
 
 class GarNet(keras.layers.Layer):
-    def __init__(self, n_aggregators, n_filters, n_propagate,
+    def __init__(self, n_aggregators, n_filters, n_propagate, total_bits, int_bits,
                  simplified=False,
                  collapse=None,
                  input_format='xn',
                  output_activation='tanh',
                  mean_by_nvert=False,
                  quantize_transforms=False,
-                 total_bits = None,
-                 int_bits = None,
                  **kwargs):
         super(GarNet, self).__init__(**kwargs)
 
@@ -42,7 +40,7 @@ class GarNet(keras.layers.Layer):
         self._total_bits = total_bits
         self._int_bits = int_bits
         self._setup_aux_params(collapse, input_format, mean_by_nvert)
-        self._setup_transforms(n_aggregators, n_filters, n_propagate)
+        self._setup_transforms(n_aggregators, n_filters, n_propagate, total_bits, int_bits)
 
     def _setup_aux_params(self, collapse, input_format, mean_by_nvert):
         if collapse is None:
@@ -55,18 +53,18 @@ class GarNet(keras.layers.Layer):
         self._input_format = input_format
         self._mean_by_nvert = mean_by_nvert
 
-    def _setup_transforms(self, n_aggregators, n_filters, n_propagate):
+    def _setup_transforms(self, n_aggregators, n_filters, n_propagate, total_bits, int_bits):
         if self._quantize_transforms:
             self._input_feature_transform = NamedQDense(n_propagate, 
-                                                        kernel_quantizer="quantized_bits(%i,%i,0,alpha=1)" %(self._total_bits, self._int_bits), 
-                                                        bias_quantizer="quantized_bits(%i,%i,0,alpha=1)" %(self._total_bits, self._int_bits), 
+                                                        kernel_quantizer="quantized_bits(%i,%i,0,alpha=1)" %(total_bits, int_bits), 
+                                                        bias_quantizer="quantized_bits(%i,%i,0,alpha=1)" %(total_bits, int_bits), 
                                                         name='FLR')
-            self._output_feature_transform = NamedQDense(n_filters, kernel_quantizer="quantized_bits(%i,%i,0,alpha=1)" %(self._total_bits, self._int_bits), 
+            self._output_feature_transform = NamedQDense(n_filters, kernel_quantizer="quantized_bits(%i,%i,0,alpha=1)" %(total_bits, int_bits), 
                                                          name='Fout')
             if (self._output_activation == None or self._output_activation == "linear"):
-                self._output_activation_transform = QActivation("quantized_bits(%i, %i)" %(self._total_bits, self._int_bits))
+                self._output_activation_transform = QActivation("quantized_bits(%i, %i)" %(total_bits, int_bits))
             else:
-                self._output_activation_transform = QActivation("quantized_%s(%i, %i)" %(self._output_activation, self._total_bits, self._int_bits))
+                self._output_activation_transform = QActivation("quantized_%s(%i, %i)" %(self._output_activation, total_bits, int_bits))
         else:
             self._input_feature_transform = NamedDense(n_propagate, name='FLR')
             self._output_feature_transform = NamedDense(n_filters, activation=self._output_activation, name='Fout')
@@ -224,7 +222,9 @@ class GarNet(keras.layers.Layer):
         config.update({
             'n_aggregators': self._aggregator_distance.units,
             'n_filters': self._output_feature_transform.units,
-            'n_propagate': self._input_feature_transform.units
+            'n_propagate': self._input_feature_transform.units,
+            'total_bits': self._total_bits,
+            'int_bits': self._int_bits
         })
 
     @staticmethod
@@ -243,90 +243,3 @@ class GarNet(keras.layers.Layer):
                 out = K.reshape(out, (-1, edge_weights.shape[1], features.shape[-1] * features.shape[-2]))
         
         return out
-
-    
-class GarNetStack(GarNet):
-    """
-    Stacked version of GarNet. First three arguments to the constructor must be lists of integers.
-    Basically offers no performance advantage, but the configuration is consolidated (and is useful
-    when e.g. converting the layer to HLS)
-    """
-    
-    def _setup_transforms(self, n_aggregators, n_filters, n_propagate):
-        self._transform_layers = []
-        # inputs are lists
-        for it, (p, a, f) in enumerate(zip(n_propagate, n_aggregators, n_filters)):
-            if self._quantize_transforms != None:
-                input_feature_transform = NamedQDense(p, 
-                                                      kernel_quantizer="quantized_bits(%i,%i,0,alpha=1)" %(self._total_bits, self._int_bits),
-                                                      bias_quantizer="quantized_bits(%i,%i,0,alpha=1)" %(self._total_bits, self._int_bits),
-                                                      name=('FLR%d' % it))
-                output_feature_transform = NamedQDense(f, kernel_quantizer="quantized_bits(%i,%i,0,alpha=1)" %(self._total_bits, self._int_bits), 
-                                                       name=('Fout%d' % it))
-                if (self._output_activation == None or self._output_activation == "linear"):
-                    output_activation_transform = QActivation("quantized_bits(%i, %i)" %(self._total_bits, self._int_bits))
-                else:
-                    output_activation_transform = QActivation("quantized_%s(%i, %i)" %(self._output_activation, self._total_bits, self._int_bits))
-            else:
-                input_feature_transform = NamedDense(p, name=('FLR%d' % it))
-                output_feature_transform = NamedDense(f, name=('Fout%d' % it))
-                output_activation_transform = keras.layers.Activation(self._output_activation)
-
-            aggregator_distance = NamedDense(a, name=('S%d' % it))
-
-            self._transform_layers.append((input_feature_transform, aggregator_distance, output_feature_transform))
-
-        self._sublayers = sum((list(layers) for layers in self._transform_layers), [])
-
-    def _build_transforms(self, data_shape):
-        for in_transform, d_compute, out_transform in self._transform_layers:
-            in_transform.build(data_shape)
-            d_compute.build(data_shape)
-            if self._simplified:
-                out_transform.build(data_shape[:2] + (d_compute.units * in_transform.units,))
-            else:
-                out_transform.build(data_shape[:2] + (data_shape[2] + d_compute.units * in_transform.units + d_compute.units,))
-
-            data_shape = data_shape[:2] + (out_transform.units,)
-
-    def call(self, x):
-        data, num_vertex, vertex_mask = self._unpack_input(x)
-
-        for in_transform, d_compute, out_transform, act_transform in self._transform_layers:
-            data = self._garnet(data, num_vertex, vertex_mask, in_transform, d_compute, out_transform, act_transform)
-        output = self._collapse_output(data)
-
-        return output
-
-    def compute_output_shape(self, input_shape):
-        return self._get_output_shape(input_shape, self._transform_layers[-1][2])
-
-    def _add_transform_config(self, config):
-        config.update({
-            'n_propagate': list(ll[0].units for ll in self._transform_layers),
-            'n_aggregators': list(ll[1].units for ll in self._transform_layers),
-            'n_filters': list(ll[2].units for ll in self._transform_layers),
-            'n_sublayers': len(self._transform_layers)
-        })
-
-    
-# tf.ragged FIXME? the last one should be no problem
-class weighted_sum_layer(keras.layers.Layer):
-    def __init__(self, **kwargs):
-        super(weighted_sum_layer, self).__init__(**kwargs)
-        
-    def get_config(self):
-        base_config = super(weighted_sum_layer, self).get_config()
-        return dict(list(base_config.items()))
-
-    def compute_output_shape(self, input_shape):
-        assert input_shape[2] > 1
-        inshape=list(input_shape)
-        return tuple((inshape[0],input_shape[2]-1))
-    
-    def call(self, inputs):
-        # input #B x E x F
-        weights = inputs[:,:,0:1] #B x E x 1
-        tosum   = inputs[:,:,1:]
-        weighted = weights * tosum #broadcast to B x E x F-1
-        return K.sum(weighted, axis=1)    

@@ -10,6 +10,7 @@
 
 import sys, os
 import hls4ml
+import pickle
 import tensorflow as tf
 from tensorflow_model_optimization.sparsity.keras import strip_pruning
 from tensorflow_model_optimization.python.core.sparsity.keras import pruning_wrapper
@@ -49,7 +50,7 @@ def synthezise(mname,plotpath,ONAME,build=False):
   PLOTS = '{}/{}/'.format(plotpath,mname)
   if not os.path.isdir(PLOTS):
     os.mkdir(PLOTS)
-    # shutil.copyfile('{}/index.php'.format(plotpath), '{}/index.php'.format(PLOTS)) #Private: for rendering web
+    shutil.copyfile('{}/index.php'.format(plotpath), '{}/index.php'.format(PLOTS)) #Private: for rendering web
   if not os.path.isdir(ONAME):
     os.mkdir(ONAME)
   
@@ -104,18 +105,14 @@ def synthezise(mname,plotpath,ONAME,build=False):
   for layer in config['LayerName'].keys():
     config['LayerName'][layer]['Trace'] = True
   
-  if 'InteractionNetwork' in mname:
-    config['LayerName'][softmax_name]['Strategy'] = 'Stable'
+  if 'InteractionNetwork' in mname or 'QGraphConv' in mname:
     config['SkipOptimizers'] = ['reshape_stream']
-    config['LayerName']['clone_permute_48'] = {}
-    config['LayerName']['clone_permute_48']['Precision'] = inputPrecision
-    config['LayerName']['concatenate_25'] = {}
-    config['LayerName']['concatenate_25']['Precision'] = inputPrecision
-     
-  # Bug! Cloned layer gets default precision rather than input precision TODO! Remove this when receive new models from Andre
-  if 'QGraphConv' in mname:
-    from hls4ml.model.optimizer.optimizer import optimizer_map
-    optimizer_map.pop('clone_output')     
+    if 'InteractionNetwork' in mname:
+      config['LayerName'][softmax_name]['Strategy'] = 'Stable'
+      config['LayerName']['clone_permute_48'] = {}
+      config['LayerName']['clone_permute_48']['Precision'] = inputPrecision
+      config['LayerName']['concatenate_25'] = {}
+      config['LayerName']['concatenate_25']['Precision'] = inputPrecision   
       
   #Special cases:      
   changeStrategy = False
@@ -136,7 +133,7 @@ def synthezise(mname,plotpath,ONAME,build=False):
   # cfg['XilinxPart'] = 'xcvu9p-flgb2104-2l-e'
   
   cfg = hls4ml.converters.create_config('xcvu9p-flgb2104-2l-e')
-  if 'GraphConv' in mname or 'InteractionNetwork' in mname:
+  if 'QGraphConv' in mname or 'InteractionNetwork' in mname:
     cfg['IOType']     = 'io_stream'
   else:
     cfg['IOType']     = 'io_parallel'
@@ -192,7 +189,13 @@ def synthezise(mname,plotpath,ONAME,build=False):
     y_hls = hls_model.predict(np.ascontiguousarray(X_test))
   accuracy_keras  = float(accuracy_score (np.argmax(Y_test,axis=1), np.argmax(y_keras,axis=1)))
   accuracy_hls4ml = float(accuracy_score (np.argmax(Y_test,axis=1), np.argmax(y_hls,axis=1)))
-
+  
+  accs = {}
+  accs['cpu'] = accuracy_keras
+  accs['fpga'] = accuracy_hls4ml
+  
+  with open('{}/{}/acc.txt'.format(ONAME,mname), "wb") as fp:
+    pickle.dump(accs, fp)
   print('Keras:\n', accuracy_keras)
   print('hls4ml:\n', accuracy_hls4ml)
   print('X_test[0]:\n', X_test[0])
@@ -241,9 +244,22 @@ def synthezise(mname,plotpath,ONAME,build=False):
     hls_model.build(csim=False, synth=True, vsynth=True)
 
 def getReports(indir):
+  
+    with open("{}/acc.txt".format(indir), "rb") as fp:
+      acc = pickle.load(fp)
+  
     data_ = {}
-    data_['architecture']   = str(indir.split('/')[-2].replace('model_',''))
-    data_['precision']   = str(indir.split('_')[-1].replace('bit',''))
+    if 'GNN_' in indir:
+      data_['architecture']   = 'GarNet'
+    elif 'GraphConv' in indir:
+      data_['architecture']   = 'GCN'  
+    elif 'InteractionNetwork' in indir:
+      data_['architecture']   = 'IN'
+    else:
+      data_['architecture']   = 'MLP'
+
+    data_['precision']   = str(indir.split('_')[-1].replace('bit','')).replace('/','')
+    data_['acc_ratio']   = round(acc['fpga']/acc['cpu'],2)
     report_vsynth = Path('{}/vivado_synth.rpt'.format(indir))
     report_csynth = Path('{}/myproject_prj/solution1/syn/report/myproject_csynth.rpt'.format(indir))
     
@@ -251,21 +267,30 @@ def getReports(indir):
         # Get the resources from the logic synthesis report 
         with report_vsynth.open() as report:
           lines = np.array(report.readlines())
-          data_['lut']     = int(lines[np.array(['CLB LUTs*' in line for line in lines])][0].split('|')[2])
-          data_['ff']      = int(lines[np.array(['CLB Registers' in line for line in lines])][0].split('|')[2])
-          data_['bram']    = float(lines[np.array(['Block RAM Tile' in line for line in lines])][0].split('|')[2])
-          data_['dsp']     = int(lines[np.array(['DSPs' in line for line in lines])][0].split('|')[2])
-          data_['lut_rel'] = float(lines[np.array(['CLB LUTs*' in line for line in lines])][0].split('|')[5])
-          data_['ff_rel']  = float(lines[np.array(['CLB Registers' in line for line in lines])][0].split('|')[5])
-          data_['bram_rel']= float(lines[np.array(['Block RAM Tile' in line for line in lines])][0].split('|')[5])
-          data_['dsp_rel'] = float(lines[np.array(['DSPs' in line for line in lines])][0].split('|')[5])
+          lut   = int(lines[np.array(['CLB LUTs*' in line for line in lines])][0].split('|')[2])
+          ff    = int(lines[np.array(['CLB Registers' in line for line in lines])][0].split('|')[2])
+          bram  = float(lines[np.array(['Block RAM Tile' in line for line in lines])][0].split('|')[2])
+          dsp   = int(lines[np.array(['DSPs' in line for line in lines])][0].split('|')[2])
+          lut_rel = round(float(lines[np.array(['CLB LUTs*' in line for line in lines])][0].split('|')[5]),1)
+          ff_rel  = round(float(lines[np.array(['CLB Registers' in line for line in lines])][0].split('|')[5]),1)
+          bram_rel= round(float(lines[np.array(['Block RAM Tile' in line for line in lines])][0].split('|')[5]),1)
+          dsp_rel = round(float(lines[np.array(['DSPs' in line for line in lines])][0].split('|')[5]),1)
+          
+          
+          data_['lut']     = "{} ({}\%)".format(lut  ,lut_rel )
+          data_['ff']      = "{} ({}\%)".format(ff   ,ff_rel  )
+          data_['bram']    = "{} ({}\%)".format(bram ,bram_rel)
+          data_['dsp']     = "{} ({}\%)".format(dsp  ,dsp_rel )
+        
+          
+          
         
         with report_csynth.open() as report:
           lines = np.array(report.readlines())
           lat_line = lines[np.argwhere(np.array(['Latency (cycles)' in line for line in lines])).flatten()[0] + 3]
-          data_['latency_clks'] = int(lat_line.split('|')[2])
-          data_['latency_ns']   = int(lat_line.split('|')[2])*5.0
-          data_['latency_ii']   = int(lat_line.split('|')[6])
+          data_['latency_clks'] = round(int(lat_line.split('|')[2]))
+          data_['latency_ns']   = round(int(lat_line.split('|')[2])*5.0)
+          data_['latency_ii']   = round(int(lat_line.split('|')[6]))
     
     return data_
 
@@ -285,18 +310,18 @@ if __name__ == "__main__":
 
   # List of models to synthesize
   models = [
+            "model_QMLP_nconst_8_nbits_4",
+            "model_QMLP_nconst_8_nbits_6",
+            "model_QMLP_nconst_8_nbits_8",
+            "model_QGraphConv_nconst_8_nbits_4",
+            "model_QGraphConv_nconst_8_nbits_6",
+            "model_QGraphConv_nconst_8_nbits_8",
             "GNN_model_4bit", #TODO! Replace by new models from Arpita, these cannot be loaded from .h5. Tune precision!
             "GNN_model_6bit",
             "GNN_model_8bit",
-            # "QGraphConv_nconst_8_nbits_4", #TODO! Replace by new models from Andre, changing input layer name
-            # "QGraphConv_nconst_8_nbits_6",
-            # "QGraphConv_nconst_8_nbits_8",
-            # "model_QInteractionNetwork_nconst_8_nbits_4",
-            # "model_QInteractionNetwork_nconst_8_nbits_6",
-            # "model_QInteractionNetwork_nconst_8_nbits_8",
-            # "model_QMLP_nconst_8_nbits_4",
-            # "model_QMLP_nconst_8_nbits_6",
-            # "model_QMLP_nconst_8_nbits_8",
+            "model_QInteractionNetwork_nconst_8_nbits_4",
+            "model_QInteractionNetwork_nconst_8_nbits_6",
+            "model_QInteractionNetwork_nconst_8_nbits_8",
           ]
   
   PLOTS = args.plotdir
@@ -315,15 +340,15 @@ if __name__ == "__main__":
   else:
     
     import pandas
-    data = {'architecture':[],'precision':[], 'dsp':[], 'lut':[], 'ff':[],'bram':[],'dsp_rel':[], 'lut_rel':[], 'ff_rel':[],'bram_rel':[], 'latency_clks':[], 'latency_ns':[], 'latency_ii':[]}
+    dataMap = {'architecture':[],'precision':[], 'acc_ratio':[], 'dsp':[], 'lut':[], 'ff':[],'bram':[], 'latency_clks':[], 'latency_ns':[], 'latency_ii':[]}
     
     for mname in models:
       print("Reading hls project {}/{}/".format(ONAME,mname))
       
       datai = getReports('{}/{}/'.format(ONAME,mname))
       for key in datai.keys():
-         data[key].append(datai[key])
+         dataMap[key].append(datai[key])
     
-    dataP = pandas.DataFrame(data)
-    print(dataP)
-    print(dataP.to_latex(columns=['architecture','precision','latency_clks','latency_ns','latency_ii','dsp','dsp_rel','lut','lut_rel','ff','ff_rel','bram','bram_rel'],header=['Architecture','Precision','Latency [cc]','Latency [ns]','II[cc]','DSP','DSP [%]','LUT','LUT [%]','FF','FF [%]','BRAM','BRAM [%]'],index=False,escape=False))
+    dataPandas = pandas.DataFrame(dataMap)
+    print(dataPandas)
+    print(dataPandas.to_latex(columns=['architecture','precision','acc_ratio','latency_ns','latency_clks','latency_ii','dsp','lut','ff','bram'],header=['Architecture','Precision ( \# bits )', 'Accuracy Ratio (FPGA/CPU)','Latency [ns]','Latency [clock cycles]','II [clock cycles]','DSP','LUT','FF','BRAM'],index=False,escape=False))
