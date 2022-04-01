@@ -1,6 +1,6 @@
 # This code requires a special version of hls4ml which includes GarNet and a few minor bug fixes not yet on master.
 # You can install it via
-# pip install git+https://https://github.com/thaarres/hls4ml.git@jet_tag_paper
+# pip install git+https://https://github.com/thaarres/hls4ml.git@jet_tag_paper_garnet_generic_quant
 # or
 # git clone -b jet_tag_paper https://github.com/thaarres/hls4ml.git
 # cd hls4ml
@@ -23,7 +23,7 @@ import pprint
 import numpy as np
 from sklearn.metrics import roc_curve, auc, accuracy_score
 
-from garnet import GarNet
+from garnet_v2 import GarNet
 
 import matplotlib.pyplot as plt 
 
@@ -43,7 +43,26 @@ def print_dict(d, indent=0):
     else:
       print(':' + ' ' * (20 - len(key) - 2 * indent) + str(value))
 
-            
+
+def rename(model, layer, new_name):
+    def _get_node_suffix(name):
+        for old_name in old_nodes:
+            if old_name.startswith(name):
+                return old_name[len(name):]
+
+    old_name = layer.name
+    old_nodes = list(model._network_nodes)
+    new_nodes = []
+
+    for l in model.layers:
+        if l.name == old_name:
+            l._name = new_name
+            # vars(l).__setitem__('_name', new)  # bypasses .__setattr__
+            new_nodes.append(new_name + _get_node_suffix(old_name))
+        else:
+            new_nodes.append(l.name + _get_node_suffix(l.name))
+    model._network_nodes = set(new_nodes)
+                
 def synthezise(mname,plotpath,ONAME,build=False):
   
   # Make output directories
@@ -66,7 +85,24 @@ def synthezise(mname,plotpath,ONAME,build=False):
     
   if DEBUG:
     model.summary()
+    print(model.get_config())
   
+  # for i,layer in enumerate(model.layers):
+  #   if layer.__class__.__name__ in ['InputLayer']:
+  #     _name = "inpt_" + str(i)
+  #     rename(model, layer, _name)
+  #
+  # model.save('TMP_{}.h5'.format(mname))
+  # loaded = tf.keras.models.load_model('TMP_{}.h5'.format(mname),
+  #                                    custom_objects={'QDense': QDense,
+  #                                                    'QActivation': QActivation,
+  #                                                    'QConv1D' : QConv1D,
+  #                                                    'QConv2D' : QConv2D,
+  #                                                    'quantized_bits': quantized_bits,
+  #                                                    'GarNet': GarNet
+  #                                                  })
+      
+    
   # Get softmax layer name
   for layer in model.layers:
     if layer.__class__.__name__ in ['Activation']:
@@ -86,7 +122,7 @@ def synthezise(mname,plotpath,ONAME,build=False):
   config['Model']['Strategy'] = 'Latency'
   config['LayerName'][softmax_name]['exp_table_t'] = 'ap_fixed<18,8>'
   config['LayerName'][softmax_name]['inv_table_t'] = 'ap_fixed<18,4>'
-  
+  config['LayerName'][softmax_name]['Strategy'] = 'Stable'
   # Handle large span of numerical values in input
   inputPrecision = 'ap_fixed<20,10,AP_RND,AP_SAT>'
   for layer in model.layers:
@@ -95,12 +131,17 @@ def synthezise(mname,plotpath,ONAME,build=False):
       config['LayerName'][layer.name]['Precision']['bias']    = inputPrecision
       config['LayerName'][layer.name]['Precision']['result']  = inputPrecision
     if layer.__class__.__name__ in ['InputLayer']:
+      config['LayerName'][layer.name]['Precision']['scale']   = inputPrecision
+      config['LayerName'][layer.name]['Precision']['bias']    = inputPrecision
       config['LayerName'][layer.name]['Precision']['result'] = inputPrecision
+      
     if layer.__class__.__name__ in ['QConv1D']: # For interaction network
        if 'tmul' in layer.name and 'linear' not in layer.name:
          config['LayerName'][layer.name]['Precision']['weight'] = 'ap_uint<1>'
          config['LayerName'][layer.name]['Precision']['bias'] = 'ap_uint<1>'
-  
+    if 'gar_1' in layer.name:
+      config['LayerName'][layer.name]['Precision']['aggregator_distance_weights'] = 'ap_fixed<16,6,AP_TRN,AP_SAT>'
+          
   # Add tracing to all hls model layers before adding non-traceable layers            
   for layer in config['LayerName'].keys():
     config['LayerName'][layer]['Trace'] = True
@@ -108,7 +149,7 @@ def synthezise(mname,plotpath,ONAME,build=False):
   if 'InteractionNetwork' in mname or 'QGraphConv' in mname:
     config['SkipOptimizers'] = ['reshape_stream']
     if 'InteractionNetwork' in mname:
-      config['LayerName'][softmax_name]['Strategy'] = 'Stable'
+      # config['LayerName'][softmax_name]['Strategy'] = 'Stable'
       config['LayerName']['clone_permute_48'] = {}
       config['LayerName']['clone_permute_48']['Precision'] = inputPrecision
       config['LayerName']['concatenate_25'] = {}
@@ -129,10 +170,9 @@ def synthezise(mname,plotpath,ONAME,build=False):
   print_dict(config)
   
   # Old hls4ml
-  # cfg = hls4ml.converters.create_vivado_config() #Deprecated
-  # cfg['XilinxPart'] = 'xcvu9p-flgb2104-2l-e'
-  
-  cfg = hls4ml.converters.create_config('xcvu9p-flgb2104-2l-e')
+  cfg = hls4ml.converters.create_config() 
+  cfg['XilinxPart'] = 'xcvu9p-flgb2104-2l-e'
+
   if 'QGraphConv' in mname or 'InteractionNetwork' in mname:
     cfg['IOType']     = 'io_stream'
   else:
@@ -143,6 +183,7 @@ def synthezise(mname,plotpath,ONAME,build=False):
   
   
   print("Convert to hls")
+  print(cfg)
   hls_model = hls4ml.converters.keras_to_hls(cfg)
   print("Compile")
   hls_model.compile()
@@ -158,16 +199,24 @@ def synthezise(mname,plotpath,ONAME,build=False):
   X_test = X_test[:3000]
   Y_test = Y_test[:3000]
     
-  if 'GNN_model_' in mname:
-    X_test = np.ascontiguousarray(np.load('/eos/home-t/thaarres/level1_jet_validation_samples/x_test_8const_garnet.npy'))
-    Y_test = np.load('/eos/home-t/thaarres/level1_jet_validation_samples/y_test_8const_garnet.npy', allow_pickle=True)
+  if 'Garnet' in mname:
+    
+    nconst = int(mname.split("_")[3])
+    X_test = np.load('/eos/home-t/thaarres/level1_jet_validation_samples/x_test_{}const_garnet.npy'.format(nconst))
+    Y_test = np.load('/eos/home-t/thaarres/level1_jet_validation_samples/y_test_{}const_garnet.npy'.format(nconst), allow_pickle=True)
     X_test = X_test[:3000]
     Y_test = Y_test[:3000]
     
-    vmax = 8
+    
+    
+    # y_keras = model.predict(X_test)
+    # y_hls = hls_model.predict(np.ascontiguousarray(X_test))
+
+
+    vmax = nconst
     feat = 3
     V_test = np.ones((X_test.shape[0],1))*vmax
-    
+
     y_hls  = np.array([])
     y_keras= np.array([])
     for i,j in zip(X_test,V_test.astype(np.float64)):
@@ -178,8 +227,20 @@ def synthezise(mname,plotpath,ONAME,build=False):
       y_hls_ = hls_model.predict(x_hls).reshape(y_keras_.shape)
       y_hls = np.concatenate([y_hls, y_hls_], axis=0) if y_hls.size else y_hls_
       y_keras = np.concatenate([y_keras, y_keras_], axis=0) if y_keras.size else y_keras_
-  
-    X_test = [X_test,V_test] 
+
+    X_test = [X_test,V_test]
+
+    hls4ml_pred, hls4ml_trace = hls_model.trace(X_test[:1000])
+
+    print("hls4ml layer 'gar_1', first sample:")
+    print(hls4ml_trace['gar_1'][0])
+
+    keras_trace = hls4ml.model.profiling.get_ymodel_keras(model, X_test[:1000])
+    print("Keras layer 'gar_1', first sample:")
+    print(keras_trace['gar_1'][0])
+    y_hls = hls_model.predict(X_test)
+
+
   elif 'GraphConv' in mname or mname.find('InteractionNetwork')!=-1:
     y_keras = model.predict(X_test)
     y_hls = hls_model.predict(np.ascontiguousarray(X_test))
@@ -187,21 +248,34 @@ def synthezise(mname,plotpath,ONAME,build=False):
     X_test = np.reshape(X_test, (-1,24))
     y_keras = model.predict(X_test)
     y_hls = hls_model.predict(np.ascontiguousarray(X_test))
+
   accuracy_keras  = float(accuracy_score (np.argmax(Y_test,axis=1), np.argmax(y_keras,axis=1)))
   accuracy_hls4ml = float(accuracy_score (np.argmax(Y_test,axis=1), np.argmax(y_hls,axis=1)))
-  
+
   accs = {}
   accs['cpu'] = accuracy_keras
   accs['fpga'] = accuracy_hls4ml
-  
+
   with open('{}/{}/acc.txt'.format(ONAME,mname), "wb") as fp:
     pickle.dump(accs, fp)
   print('Keras:\n', accuracy_keras)
   print('hls4ml:\n', accuracy_hls4ml)
-  print('X_test[0]:\n', X_test[0])
-  print('Y_test[0]:\n', Y_test[0])
-  print('y_keras[0]:\n', y_keras[0])
-  print('y_hls[0]:\n', y_hls[0])
+
+  if DEBUG:
+    print('X_test[0]:\n', X_test[0])
+    print('Y_test[0]:\n', Y_test[0])
+    print('y_keras[0]:\n', y_keras[0])
+    print('y_hls[0]:\n', y_hls[0])
+
+    layer = list(hls_model.get_layers())[2]
+    w = list(layer.get_weights())
+    for w_ in w:
+      print("Getting weights: ", w_)
+      q = w_.quantizer
+      print("Getting quantizer: ", q)
+      if q:
+        print("q(w_.data)) ",q(w_.data))
+        print("q.quantizer_fn.scale) ",q.quantizer_fn.scale)
 
   # Plot the ROC curves
   colors  = ['#d73027','#fc8d59','#fee090','#e0f3f8','#91bfdb','#4575b4']
@@ -228,15 +302,15 @@ def synthezise(mname,plotpath,ONAME,build=False):
   #ax.set_grid(True)
   ax.legend(loc='lower right')
   plt.savefig('{}/ROC_keras_{}.png'.format(PLOTS,mname))
-  
-  if not 'GNN_' in mname: #TODO! Add profiling for multiple inputs
-    wp, wph, ap, aph = hls4ml.model.profiling.numerical(model,hls_model,X_test)
-    wp.savefig("{}/wp_{}.png".format(PLOTS,mname))
-    wph.savefig("{}/wph_{}.png".format(PLOTS,mname))
-    ap.savefig("{}/ap_{}.png".format(PLOTS,mname))
-    aph.savefig("{}/aph_{}.png".format(PLOTS,mname))
-    fig = hls4ml.model.profiling.compare(model,hls_model,X_test)
-    fig.savefig("{}/compare_{}.png".format(PLOTS,mname))
+
+  # if not 'GarNet' in mname: #TODO! Add profiling for multiple inputs
+  wp, wph, ap, aph = hls4ml.model.profiling.numerical(model,hls_model,X_test)
+  wp.savefig("{}/wp_{}.png".format(PLOTS,mname))
+  wph.savefig("{}/wph_{}.png".format(PLOTS,mname))
+  ap.savefig("{}/ap_{}.png".format(PLOTS,mname))
+  aph.savefig("{}/aph_{}.png".format(PLOTS,mname))
+  fig = hls4ml.model.profiling.compare(model,hls_model,X_test)
+  fig.savefig("{}/compare_{}.png".format(PLOTS,mname))
 
   
   print("Running synthesis!")
@@ -249,7 +323,7 @@ def getReports(indir):
       acc = pickle.load(fp)
   
     data_ = {}
-    if 'GNN_' in indir:
+    if 'Garnet' in indir:
       data_['architecture']   = 'GarNet'
     elif 'GraphConv' in indir:
       data_['architecture']   = 'GCN'  
@@ -309,19 +383,24 @@ if __name__ == "__main__":
   
 
   # List of models to synthesize
-  models = [
-            "model_QMLP_nconst_8_nbits_4",
-            "model_QMLP_nconst_8_nbits_6",
-            "model_QMLP_nconst_8_nbits_8",
-            "model_QGraphConv_nconst_8_nbits_4",
-            "model_QGraphConv_nconst_8_nbits_6",
-            "model_QGraphConv_nconst_8_nbits_8",
-            "GNN_model_4bit", #TODO! Replace by new models from Arpita, these cannot be loaded from .h5. Tune precision!
-            "GNN_model_6bit",
-            "GNN_model_8bit",
-            "model_QInteractionNetwork_nconst_8_nbits_4",
-            "model_QInteractionNetwork_nconst_8_nbits_6",
-            "model_QInteractionNetwork_nconst_8_nbits_8",
+  models = [  #  "model_QMLP_nconst_32_nbits_8"
+              #  "model_Garnet_nconst_8_nbits_8",
+              #  "model_Garnet_nconst_16_nbits_8",
+              # "model_Garnet_nconst_32_nbits_8",
+              # "model_Garnet_nconst_8_nbits_4",
+              # "model_Garnet_nconst_8_nbits_6",
+              # "model_Garnet_nconst_8_nbits_8",
+            # "model_QMLP_nconst_8_nbits_6",
+            # "model_QMLP_nconst_8_nbits_8",
+            # "model_QGraphConv_nconst_8_nbits_4",
+            # "model_QGraphConv_nconst_8_nbits_6",
+            # "model_QGraphConv_nconst_8_nbits_8",
+            # "model_QInteractionNetwork_nconst_8_nbits_4",
+            # "model_QInteractionNetwork_nconst_8_nbits_6",
+            # "model_QInteractionNetwork_nconst_8_nbits_8",
+            "model_QInteractionNetwork_Conv1D_nconst_8_nbits_8"
+            #"model_QInteractionNetwork_nconst_16_nbits_8",
+            # "model_QInteractionNetwork_nconst_32_nbits_8"
           ]
   
   PLOTS = args.plotdir
