@@ -1,11 +1,6 @@
 # This code requires a special version of hls4ml which includes GarNet and a few minor bug fixes not yet on master.
 # You can install it via
-# pip install git+https://https://github.com/thaarres/hls4ml.git@jet_tag_paper_garnet_generic_quant
-# or
-# git clone -b jet_tag_paper https://github.com/thaarres/hls4ml.git
-# cd hls4ml
-# pip install . --user
-#
+# pip install git+https://github.com/thaarres/hls4ml.git@jet_tag_paper_garnet_generic_quant
 # The current projects can be inspected at https://thaarres.web.cern.ch/thaarres/l1_jet_tagging/l1_jet_tagging_hls4ml_dataset/
 
 import sys, os
@@ -120,6 +115,7 @@ def synthezise(mname,plotpath,ONAME,build=False):
   # make hls config
   config = hls4ml.utils.config_from_keras_model(model, granularity='name',default_reuse_factor=1) #, default_precision='ap_fixed<24,12>'
   config['Model']['Strategy'] = 'Latency'
+  # config['Model']['ReuseFactor'] = 50
   config['LayerName'][softmax_name]['exp_table_t'] = 'ap_fixed<18,8>'
   config['LayerName'][softmax_name]['inv_table_t'] = 'ap_fixed<18,4>'
   config['LayerName'][softmax_name]['Strategy'] = 'Stable'
@@ -192,26 +188,18 @@ def synthezise(mname,plotpath,ONAME,build=False):
   hls4ml.utils.plot_model(hls_model, show_shapes=True, show_precision=True, to_file='{}/hls4ml_in_plot_{}.png'.format(PLOTS,mname))
   tf.keras.utils.plot_model(model,to_file='{}/keras_in_plot_{}.png'.format(PLOTS,mname))
   
+ 
+
   
-  # Has shape (-1,8,3)
-  X_test = np.ascontiguousarray(np.load('/eos/home-t/thaarres/level1_jet_validation_samples/x_test_8const_full.npy'))
-  Y_test = np.load('/eos/home-t/thaarres/level1_jet_validation_samples/y_test_8const_full.npy', allow_pickle=True)
-  X_test = X_test[:3000]
-  Y_test = Y_test[:3000]
     
   if 'Garnet' in mname:
     
     nconst = int(mname.split("_")[3])
+
     X_test = np.load('/eos/home-t/thaarres/level1_jet_validation_samples/x_test_{}const_garnet.npy'.format(nconst))
     Y_test = np.load('/eos/home-t/thaarres/level1_jet_validation_samples/y_test_{}const_garnet.npy'.format(nconst), allow_pickle=True)
     X_test = X_test[:3000]
     Y_test = Y_test[:3000]
-    
-    
-    
-    # y_keras = model.predict(X_test)
-    # y_hls = hls_model.predict(np.ascontiguousarray(X_test))
-
 
     vmax = nconst
     feat = 3
@@ -242,6 +230,14 @@ def synthezise(mname,plotpath,ONAME,build=False):
 
 
   elif 'GraphConv' in mname or mname.find('InteractionNetwork')!=-1:
+    
+    nconst = int(mname.split("_")[4])
+    # Has shape (-1,8,3)
+    X_test = np.ascontiguousarray(np.load('/eos/home-t/thaarres/level1_jet_validation_samples/x_test_{}const_QGraphConv.npy'.format(nconst)))
+    Y_test = np.load('/eos/home-t/thaarres/level1_jet_validation_samples/y_test_{}const_QGraphConv.npy'.format(nconst), allow_pickle=True)
+    X_test = X_test[:3000]
+    Y_test = Y_test[:3000]
+    
     y_keras = model.predict(X_test)
     y_hls = hls_model.predict(np.ascontiguousarray(X_test))
   else:
@@ -383,24 +379,21 @@ if __name__ == "__main__":
   
 
   # List of models to synthesize
-  models = [  #  "model_QMLP_nconst_32_nbits_8"
-              #  "model_Garnet_nconst_8_nbits_8",
-              #  "model_Garnet_nconst_16_nbits_8",
-              # "model_Garnet_nconst_32_nbits_8",
-              # "model_Garnet_nconst_8_nbits_4",
-              # "model_Garnet_nconst_8_nbits_6",
-              # "model_Garnet_nconst_8_nbits_8",
+  models = [
             # "model_QMLP_nconst_8_nbits_6",
             # "model_QMLP_nconst_8_nbits_8",
             # "model_QGraphConv_nconst_8_nbits_4",
             # "model_QGraphConv_nconst_8_nbits_6",
             # "model_QGraphConv_nconst_8_nbits_8",
-            # "model_QInteractionNetwork_nconst_8_nbits_4",
-            # "model_QInteractionNetwork_nconst_8_nbits_6",
-            # "model_QInteractionNetwork_nconst_8_nbits_8",
-            "model_QInteractionNetwork_Conv1D_nconst_8_nbits_8"
-            #"model_QInteractionNetwork_nconst_16_nbits_8",
-            # "model_QInteractionNetwork_nconst_32_nbits_8"
+            # "model_Garnet_nconst_8_nbits_8",
+            # "model_Garnet_nconst_16_nbits_8",
+            # "model_Garnet_nconst_32_nbits_8",
+            # "model_Garnet_nconst_8_nbits_4",
+            # "model_Garnet_nconst_8_nbits_6",
+            # "model_Garnet_nconst_8_nbits_8",
+            "model_QInteractionNetwork_Conv1D_nconst_8_nbits_4",
+            "model_QInteractionNetwork_Conv1D_nconst_8_nbits_6",
+            "model_QInteractionNetwork_Conv1D_nconst_8_nbits_8"            
           ]
   
   PLOTS = args.plotdir
